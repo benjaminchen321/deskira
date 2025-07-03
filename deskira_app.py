@@ -1,120 +1,140 @@
 import sys
-from PyQt6.QtWidgets import QApplication, QWidget
-from PyQt6.QtCore import Qt, pyqtSignal
-from pynput import keyboard
 import threading
+from typing import Dict, Callable
+
+from pynput import keyboard
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout
 
 
 class DeskiraApp(QWidget):
     """
     The main application window for Deskira.
-    This class creates a semi-transparent, borderless window that stays on top.
+    This class creates a semi-transparent, borderless window that stays on top,
+    can be toggled with a global hotkey, and can be moved with hotkeys.
     """
-    # --- NEW: Signal for thread-safe UI updates ---
-    # A signal is used to communicate from the non-GUI hotkey listener thread
-    # to the main GUI thread.
     toggle_visibility_signal = pyqtSignal()
+    move_window_signal = pyqtSignal(str)
+    quit_app_signal = pyqtSignal()
 
-    def __init__(self):
+    MOVE_INCREMENT: int = 30
+
+    def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Deskira")
 
-        # --- Window Flags ---
-        # These flags define the window's appearance and behavior.
-        # Qt.WindowType.FramelessWindowHint: Removes the window frame (title bar, buttons).
-        # Qt.WindowType.WindowStaysOnTopHint: Ensures the window is always on top of others.
         self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint
         )
 
-        # --- Appearance ---
-        # Set the opacity of the window (0.0 = fully transparent, 1.0 = fully opaque).
-        self.setWindowOpacity(0.9)
-
-        # Set the background color of the window using a stylesheet.
-        # Without a color, a transparent window would be invisible.
-        self.setStyleSheet("background-color: #828282;")
-
-        # --- Size and Position ---
-        # Set a default size for the window.
-        self.resize(1000, 1000)
-
-        # Center the window on the screen.
+        self.setWindowOpacity(0.85)
+        self.setStyleSheet("""
+            background-color: #2E2E2E;
+            color: #FFFFFF;
+            font-size: 16px;
+        """)
+        self.resize(800, 600)
         self.center_window()
 
-        # --- NEW: Connect the signal to the slot (the function to execute) ---
-        self.toggle_visibility_signal.connect(self.toggle_visibility)
+        self.setup_ui()
 
-        # --- NEW: Set up and start the hotkey listener in a separate thread ---
+        self.toggle_visibility_signal.connect(self.toggle_visibility)  # type: ignore
+        self.move_window_signal.connect(self.move_window)  # type: ignore
+        self.quit_app_signal.connect(self.quit_app)  # type: ignore
+
         self.hotkey_listener_thread = threading.Thread(target=self.setup_hotkey_listener, daemon=True)
         self.hotkey_listener_thread.start()
 
-        # --- NEW: Keep track of the window's initial state ---
-        # We start hidden so the first hotkey press shows the window.
-        self.hide()
+        self.show()
 
-    def center_window(self):
+    def setup_ui(self) -> None:
+        """Creates and arranges UI widgets."""
+        layout = QVBoxLayout()
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        instructions_text = (
+            "Welcome to Deskira!\n\n"
+            "Hotkeys:\n"
+            "  - Cmd + B: Show / Hide Window\n"
+            "  - Cmd + Arrow Keys: Move Window\n"
+            "  - Cmd + Q: Quit Application"
+        )
+        instructions_label = QLabel(instructions_text)
+        instructions_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        instructions_label.setWordWrap(True)
+
+        layout.addWidget(instructions_label)
+        self.setLayout(layout)
+
+    def center_window(self) -> None:
         """Helper function to center the window on the primary screen."""
-        screen_geometry = QApplication.primaryScreen().geometry()
-        x = (screen_geometry.width() - self.width()) // 2
-        y = (screen_geometry.height() - self.height()) // 2
-        self.move(x, y)
+        primary_screen = QApplication.primaryScreen()
+        if primary_screen:
+            screen_geometry = primary_screen.geometry()
+            x = (screen_geometry.width() - self.width()) // 2
+            y = (screen_geometry.height() - self.height()) // 2
+            self.move(x, y)
 
-    # --- NEW: Slot to toggle window visibility ---
-    def toggle_visibility(self):
+    def toggle_visibility(self) -> None:
         """Shows the window if it's hidden, and hides it if it's visible."""
         if self.isVisible():
             self.hide()
         else:
-            # We re-center the window every time it's shown.
             self.center_window()
             self.show()
-            self.activateWindow()  # Bring window to the front
+            self.activateWindow()
 
-    # --- NEW: Hotkey listener setup ---
-    def setup_hotkey_listener(self):
+    def move_window(self, direction: str) -> None:
+        """Moves the window in the specified direction."""
+        if not self.isVisible():
+            return
+
+        current_pos = self.pos()
+        new_x, new_y = current_pos.x(), current_pos.y()
+
+        if direction == "up":
+            new_y -= self.MOVE_INCREMENT
+        elif direction == "down":
+            new_y += self.MOVE_INCREMENT
+        elif direction == "left":
+            new_x -= self.MOVE_INCREMENT
+        elif direction == "right":
+            new_x += self.MOVE_INCREMENT
+
+        self.move(new_x, new_y)
+
+    def quit_app(self) -> None:
+        """Safely quits the QApplication."""
+        app_instance = QApplication.instance()
+        if app_instance:
+            app_instance.quit()
+
+    # --- REFACTORED: Hotkey listener now uses the robust keyboard.HotKey class ---
+    def setup_hotkey_listener(self) -> None:
         """
-        Sets up and runs the pynput keyboard listener.
-        This function runs in a separate thread.
+        Sets up and runs the pynput keyboard listener using the HotKey class
+        for robust, system-wide hotkey registration and suppression.
         """
-        # The key combination to listen for.
-        # For macOS, Command is keyboard.Key.cmd
-        HOTKEYS = {
-            keyboard.Key.cmd,
-            keyboard.KeyCode(char='b')
+        # Define hotkeys and the functions they should call.
+        # The functions emit signals to the main GUI thread.
+        hotkey_actions: Dict[str, Callable[[], None]] = {
+            '<cmd>+b': lambda: self.toggle_visibility_signal.emit(),
+            '<cmd>+q': lambda: self.quit_app_signal.emit(),
+            '<cmd>+<up>': lambda: self.move_window_signal.emit("up"),
+            '<cmd>+<down>': lambda: self.move_window_signal.emit("down"),
+            '<cmd>+<left>': lambda: self.move_window_signal.emit("left"),
+            '<cmd>+<right>': lambda: self.move_window_signal.emit("right"),
         }
-        current_keys = set()
 
-        def on_press(key):
-            if key in HOTKEYS:
-                current_keys.add(key)
-                if all(k in current_keys for k in HOTKEYS):
-                    # When the combination is pressed, emit the signal.
-                    self.toggle_visibility_signal.emit()
-
-        def on_release(key):
-            try:
-                current_keys.remove(key)
-            except KeyError:
-                pass  # Key was not in the set
-
-        # The listener will run in this thread until the main app closes.
-        with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
-            listener.join()
+        # Create a pynput global hotkey listener.
+        # This listener is more reliable for this specific task.
+        listener = keyboard.GlobalHotKeys(hotkey_actions)
+        listener.start()
+        listener.join()
 
 
-# --- Main Execution Block ---
-# This is the entry point of our application.
 if __name__ == "__main__":
-    # Create the application instance. sys.argv allows command-line arguments.
     app = QApplication(sys.argv)
-
-    # Create an instance of our main window.
     window = DeskiraApp()
-
-    # Show the window on the screen.
-    window.show()
-
-    # Start the application's event loop. This keeps the window open.
-    # sys.exit() ensures a clean exit.
     sys.exit(app.exec())
